@@ -13,6 +13,9 @@ module Resque
     autoload :Extension, 'resque/scheduler/extension'
     autoload :Util, 'resque/scheduler/util'
     autoload :VERSION, 'resque/scheduler/version'
+    INTERMITTENT_ERRORS = [
+      Errno::EAGAIN, Errno::ECONNRESET, Redis::CannotConnectError, Redis::TimeoutError
+    ].freeze
 
     private
 
@@ -44,13 +47,7 @@ module Resque
         $stdout.sync = true
         $stderr.sync = true
 
-        # Load the schedule into rufus
-        # If dynamic is set, load that schedule otherwise use normal load
-        if dynamic
-          reload_schedule!
-        else
-          load_schedule!
-        end
+        was_master = nil
 
         begin
           @th = Thread.current
@@ -58,11 +55,21 @@ module Resque
           # Now start the scheduling part of the loop.
           loop do
             begin
-              if master?
+              # Check on changes to master/child
+              @am_master = master?
+              if am_master != was_master
+                procline am_master ? 'Master scheduler' : 'Child scheduler'
+
+                # Load schedule because changed
+                reload_schedule!
+              end
+
+              if am_master
                 handle_delayed_items
                 update_schedule if dynamic
               end
-            rescue Errno::EAGAIN, Errno::ECONNRESET, Redis::CannotConnectError => e
+              was_master = am_master
+            rescue *INTERMITTENT_ERRORS => e
               log! e.message
               release_master_lock
             end
@@ -99,7 +106,7 @@ module Resque
         Resque.schedule.each do |name, config|
           load_schedule_job(name, config)
         end
-        Resque.redis.del(:schedules_changed)
+        Resque.redis.del(:schedules_changed) if am_master && dynamic
         procline 'Schedules Loaded'
       end
 
@@ -202,7 +209,7 @@ module Resque
         loop do
           handle_shutdown do
             # Continually check that it is still the master
-            item = enqueue_next_item(timestamp) if master?
+            item = enqueue_next_item(timestamp) if am_master
           end
           # continue processing until there are no more ready items in this
           # timestamp
@@ -439,11 +446,11 @@ module Resque
       end
 
       def enqueue_recurring(name, config)
-        if master?
+        if am_master
           if should_enqueue?(config)
             log! "queueing #{config['class']} (#{name})"
-            Resque.last_enqueued_at(name, Time.now.to_s)
             enqueue(config)
+            Resque.last_enqueued_at(name, Time.now.to_s)
           else
             log! "No overlap allowed. Not enqueueing #{config['class']} (#{name})"
           end
@@ -464,6 +471,11 @@ module Resque
 
       def internal_name
         "resque-scheduler-#{Resque::Scheduler::VERSION}"
+      end
+
+      def am_master
+        @am_master = master? unless defined?(@am_master)
+        @am_master
       end
     end
   end

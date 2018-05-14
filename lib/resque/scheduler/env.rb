@@ -43,7 +43,7 @@ module Resque
         end
 
         Process.daemon(true, !Resque::Scheduler.quiet)
-        Resque.redis.client.reconnect
+        Resque.redis._client.reconnect
       end
 
       def setup_pid_file
@@ -70,7 +70,7 @@ module Resque
 
           c.logformat = options[:logformat] if options.key?(:logformat)
 
-          if psleep = options[:poll_sleep_amount] && !psleep.nil?
+          if (psleep = options[:poll_sleep_amount]) && !psleep.nil?
             c.poll_sleep_amount = Float(psleep)
           end
 
